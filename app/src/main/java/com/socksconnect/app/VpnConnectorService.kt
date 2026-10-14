@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Debug
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -50,6 +51,7 @@ class VpnConnectorService : VpnService() {
         private const val INITIAL_BACKOFF_MS = 3_000L
         private const val MAX_BACKOFF_MS = 30_000L
         private const val RETRY_AFTER_STOP_MS = 3_000L
+        private const val RAM_REFRESH_MS = 3_000L
 
         // 供界面读取的连接状态（单实例服务，随进程存活）
         @Volatile
@@ -96,6 +98,17 @@ class VpnConnectorService : VpnService() {
     private var notificationManager: NotificationManager? = null
     private var worker: VpnWorker? = null
 
+    /** 服务运行期间每 3 秒重建一次通知，刷新内存占用数字 */
+    private val notificationTicker = object : Runnable {
+        override fun run() {
+            if (worker == null) return
+            runCatching {
+                notificationManager?.notify(NOTIFICATION_ID, buildNotification(state))
+            }
+            mainHandler.postDelayed(this, RAM_REFRESH_MS)
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -128,6 +141,8 @@ class VpnConnectorService : VpnService() {
                     this, NOTIFICATION_ID, buildNotification(state),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                 )
+                mainHandler.removeCallbacks(notificationTicker)
+                mainHandler.postDelayed(notificationTicker, RAM_REFRESH_MS)
             }
             ACTION_DISCONNECT -> stopWorker()
             else -> stopSelf()
@@ -138,6 +153,7 @@ class VpnConnectorService : VpnService() {
     override fun onDestroy() {
         worker?.cancel()
         worker = null
+        mainHandler.removeCallbacks(notificationTicker)
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -159,6 +175,7 @@ class VpnConnectorService : VpnService() {
     private fun stopWorker() {
         worker?.cancelAndWait()
         worker = null
+        mainHandler.removeCallbacks(notificationTicker)
         state = State.DISCONNECTED
         lastError = null
         notifyListeners()
@@ -178,6 +195,9 @@ class VpnConnectorService : VpnService() {
 
     private fun buildNotification(st: State): Notification {
         val addr = address.orEmpty()
+        val mem = Debug.MemoryInfo()
+        Debug.getMemoryInfo(mem)
+        val ramMb = mem.totalPss / 1024
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(
@@ -188,7 +208,7 @@ class VpnConnectorService : VpnService() {
                     State.DISCONNECTED -> getString(R.string.app_name)
                 }
             )
-            .setContentText(addr)
+            .setContentText(getString(R.string.notif_ram, ramMb) + " · " + addr)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -201,7 +221,7 @@ class VpnConnectorService : VpnService() {
                     .format(java.util.Date(connectedAt))
                 builder.setStyle(
                     NotificationCompat.BigTextStyle()
-                        .bigText(getString(R.string.notif_detail, time, addr))
+                        .bigText(getString(R.string.notif_detail, time, addr, ramMb))
                 )
             }
             State.RECONNECTING -> lastError?.let {

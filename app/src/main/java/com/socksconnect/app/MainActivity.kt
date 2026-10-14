@@ -3,9 +3,13 @@ package com.socksconnect.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Debug
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.View
 import android.widget.TextView
@@ -15,6 +19,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.DynamicColors
@@ -34,6 +39,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStart: MaterialButton
     private lateinit var btnStop: MaterialButton
     private lateinit var textStatus: TextView
+    private lateinit var textRam: TextView
+
+    private val ramHandler = Handler(Looper.getMainLooper())
+    private val ramTicker = object : Runnable {
+        override fun run() {
+            updateRam()
+            ramHandler.postDelayed(this, 2000)
+        }
+    }
 
     private var pendingHost: String? = null
     private var pendingPort = 0
@@ -74,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         btnStart = findViewById(R.id.btn_start)
         btnStop = findViewById(R.id.btn_stop)
         textStatus = findViewById(R.id.text_status)
+        textRam = findViewById(R.id.text_ram)
 
         dropProtocol.setSimpleItems(VpnConnectorService.PROTOCOLS)
 
@@ -98,6 +113,15 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
+        // 沉浸式：内容绘制到状态栏/导航栏之后（各版本统一处理，图标颜色随深浅色主题）
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val lightBars =
+            (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) !=
+                Configuration.UI_MODE_NIGHT_YES
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = lightBars
+        insetsController.isAppearanceLightNavigationBars = lightBars
+
         updateUi()
     }
 
@@ -110,6 +134,22 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         VpnConnectorService.removeListener(stateListener)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ramTicker.run()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ramHandler.removeCallbacks(ramTicker)
+    }
+
+    private fun updateRam() {
+        val mem = Debug.MemoryInfo()
+        Debug.getMemoryInfo(mem)
+        textRam.text = getString(R.string.app_ram, mem.totalPss / 1024)
     }
 
     private fun onStartClicked() {

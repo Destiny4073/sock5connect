@@ -18,7 +18,9 @@
     <string name="notif_connected">全局代理中 · %1$s</string>
     <string name="notif_connecting">正在连接…</string>
     <string name="notif_reconnecting">连接已断开，正在重试…</string>
-    <string name="notif_detail">连接时间：%1$s\n服务器：%2$s</string>
+    <string name="notif_detail">连接时间：%1$s\n服务器：%2$s\n内存占用：%3$d MB</string>
+    <string name="notif_ram">内存占用 %1$d MB</string>
+    <string name="app_ram">内存占用：%1$d MB</string>
     <string name="notif_detail_fail">上次失败：%1$s\n目标：%2$s</string>
     <string name="action_disconnect">断开连接</string>
 

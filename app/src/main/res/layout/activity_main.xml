@@ -84,4 +84,12 @@
         android:text="@string/status_disconnected"
         android:textAppearance="?attr/textAppearanceBodyMedium"
         android:textColor="?attr/colorOnSurfaceVariant" />
+
+    <TextView
+        android:id="@+id/text_ram"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textAppearance="?attr/textAppearanceBodySmall"
+        android:textColor="?attr/colorOnSurfaceVariant" />
 </LinearLayout>
