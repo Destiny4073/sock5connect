@@ -1,5 +1,6 @@
-# 基于 hev-socks5-tunnel 官方 Android.mk 修改：去掉可执行文件构建，
-# 并把本项目的 JNI 封装（tunnel_jni.c）编入同一个共享库。
+# 基于 hev-socks5-tunnel 官方 Android.mk 修改：去掉可执行文件构建。
+# JNI 注册由库自带的 src/hev-jni.c 完成（类名经 Application.mk 的
+# PKGNAME/CLSNAME 宏指向 com.socksconnect.app.HevTunnel）。
 
 TOP_PATH := $(call my-dir)
 
@@ -33,7 +34,7 @@ HEV_SOCKS5_TUNNEL_LDFLAGS := \
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := hev-socks5-tunnel
-LOCAL_SRC_FILES := $(HEV_SOCKS5_TUNNEL_SRC) tunnel_jni.c
+LOCAL_SRC_FILES := $(HEV_SOCKS5_TUNNEL_SRC)
 LOCAL_C_INCLUDES := $(HEV_SOCKS5_TUNNEL_INCLUDES)
 LOCAL_CFLAGS += -DFD_SET_DEFINED -DSOCKLEN_T_DEFINED -DENABLE_LIBRARY
 LOCAL_CFLAGS += -fno-stack-clash-protection $(VERSION_CFLAGS)

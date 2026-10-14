@@ -37,7 +37,7 @@ HTTP / HTTPS / SOCKS5 代理服务器，并在通知栏显示连接状态。
 ```bash
 mkdir -p build-native/jni
 git clone --recursive --depth 1 https://github.com/heiher/hev-socks5-tunnel build-native/jni
-cp native/Android.mk native/Application.mk native/tunnel_jni.c build-native/jni/
+cp native/Android.mk native/Application.mk build-native/jni/
 (cd build-native && ndk-build)
 mkdir -p app/src/main/jniLibs/{armeabi-v7a,arm64-v8a,x86,x86_64}
 cp build-native/libs/*/libhev-socks5-tunnel.so app/src/main/jniLibs/*/  # 按目录对应

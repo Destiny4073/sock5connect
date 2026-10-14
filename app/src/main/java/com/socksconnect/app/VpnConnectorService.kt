@@ -242,7 +242,7 @@ class VpnConnectorService : VpnService() {
 
         fun cancel() {
             cancelled = true
-            runCatching { HevTunnel.stop() }
+            runCatching { HevTunnel.TProxyStopService() }
             runCatching { server?.stop() }
             closeTunnel()
         }
@@ -289,37 +289,30 @@ class VpnConnectorService : VpnService() {
             val hevLog = File(cacheDir, "hev.log")
             runCatching { hevLog.delete() }
             cfg.writeText(buildConfig(hevLog.absolutePath))
-            var exitCode = -1
-            var thrown: String? = null
-            val hevThread = Thread({
-                try {
-                    exitCode = HevTunnel.start(cfg.absolutePath, fd.fd)
-                } catch (t: Throwable) {
-                    thrown = t.message ?: t.javaClass.simpleName
-                }
-            }, "HevTunnel")
-            hevThread.start()
-            // 轮询等待 hev 进入事件循环；配置或网卡出错时它会立即退出
+            if (!HevTunnel.TProxyStartService(cfg.absolutePath, fd.fd)) {
+                lastError = "hev 启动失败（内部线程创建失败）"
+                return false
+            }
+            // 轮询等待进入稳定运行态；配置或网卡出错时内部线程会立即退出
             var waited = 0
-            while (!cancelled && hevThread.isAlive && waited < 1500) {
+            while (!cancelled && HevTunnel.TProxyIsRunning() && waited < 1500) {
                 sleepWhile(150)
                 waited += 150
             }
             if (cancelled) return false
-            if (!hevThread.isAlive) {
-                lastError = describeHevFailure(exitCode, thrown, hevLog)
+            if (!HevTunnel.TProxyIsRunning()) {
+                lastError = describeHevFailure(hevLog)
                 return false
             }
             connectedAt = System.currentTimeMillis()
             lastError = null
             publishState(State.CONNECTED)
-            try {
-                hevThread.join()
-            } catch (_: InterruptedException) {
-                cancelled = true
+            // 库内部线程退出即隧道结束（被停止或运行出错）
+            while (!cancelled && HevTunnel.TProxyIsRunning()) {
+                sleepWhile(250)
             }
-            if (exitCode != 0 || thrown != null) {
-                lastError = describeHevFailure(exitCode, thrown, hevLog)
+            if (!cancelled) {
+                lastError = describeHevFailure(hevLog)
             }
             return true
         }
@@ -355,13 +348,10 @@ class VpnConnectorService : VpnService() {
               log-level: debug
         """.trimIndent()
 
-        /** 汇总 hev 的退出码、异常信息与日志末尾，便于在状态栏定位失败原因 */
-        private fun describeHevFailure(code: Int, thrown: String?, log: File): String =
+        /** 汇总失败原因：hev 日志末尾会包含配置解析、网卡设置等错误详情 */
+        private fun describeHevFailure(log: File): String =
             buildString {
-                append(
-                    if (thrown != null) "hev 启动异常：$thrown"
-                    else "hev 隧道退出（代码 $code）"
-                )
+                append("hev 隧道已退出")
                 runCatching {
                     val text = log.readText().trim()
                     if (text.isNotEmpty()) append('\n').append(text.takeLast(400))

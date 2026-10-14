@@ -1,14 +1,28 @@
 package com.socksconnect.app
 
-/** JNI 桥接，实现见 native/tunnel_jni.c（链接 hev-socks5-tunnel） */
+/**
+ * hev-socks5-tunnel 的 JNI 接口。
+ * 库内的 src/hev-jni.c 在 JNI_OnLoad 时把下列 TProxy* 静态方法注册到本类
+ * （类名由 native/Application.mk 的 PKGNAME/CLSNAME 宏指定），方法名不可更改。
+ */
 internal object HevTunnel {
     init {
         System.loadLibrary("hev-socks5-tunnel")
     }
 
-    /** 阻塞运行隧道事件循环，直到 [stop] 被调用或出错；返回 hev 的退出码，0 为正常 */
-    external fun start(configPath: String, tunFd: Int): Int
+    /** 启动隧道（库内部自建线程运行，立即返回）；false 表示启动失败或已在运行 */
+    @JvmStatic
+    external fun TProxyStartService(configPath: String, tunFd: Int): Boolean
 
-    /** 请求停止运行中的隧道（可在其他线程调用） */
-    external fun stop()
+    /** 停止隧道并等待内部线程退出 */
+    @JvmStatic
+    external fun TProxyStopService(): Boolean
+
+    /** 隧道是否运行中 */
+    @JvmStatic
+    external fun TProxyIsRunning(): Boolean
+
+    /** [txPackets, txBytes, rxPackets, rxBytes] */
+    @JvmStatic
+    external fun TProxyGetStats(): LongArray?
 }
