@@ -31,6 +31,10 @@ class ConnectorService : Service() {
 
     enum class State { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING }
 
+    interface Listener {
+        fun onStateChanged()
+    }
+
     companion object {
         const val ACTION_START = "com.socksconnect.app.action.START"
         const val ACTION_DISCONNECT = "com.socksconnect.app.action.DISCONNECT"
@@ -67,10 +71,6 @@ class ConnectorService : Service() {
         @Volatile
         var lastError: String? = null
             internal set
-
-        fun interface Listener {
-            fun onStateChanged()
-        }
 
         private val listeners = CopyOnWriteArrayList<Listener>()
 
@@ -139,8 +139,10 @@ class ConnectorService : Service() {
     private fun startWorker(proto: String, host: String, port: Int) {
         worker?.cancelAndWait()
         val w = Worker(proto, host, port)
+        val t = Thread(w, "ProxyConnector")
+        w.thread = t
         worker = w
-        w.start()
+        t.start()
     }
 
     private fun stopWorker() {
@@ -217,15 +219,19 @@ class ConnectorService : Service() {
         )
     }
 
+    // 实现 Runnable 而非继承 Thread：Thread 自带的 State 枚举和 getState() 属性
+    // 会遮蔽本类的 State 枚举与 companion 里的状态变量
     private inner class Worker(
         private val proto: String,
         private val host: String,
         private val port: Int
-    ) : Thread("ProxyConnector") {
+    ) : Runnable {
 
         @Volatile
         var cancelled = false
             private set
+
+        var thread: Thread? = null
 
         private var socket: Socket? = null
         private val socketLock = Any()
@@ -239,7 +245,7 @@ class ConnectorService : Service() {
 
         fun cancelAndWait() {
             cancel()
-            join(1500)
+            thread?.join(1500)
         }
 
         override fun run() {

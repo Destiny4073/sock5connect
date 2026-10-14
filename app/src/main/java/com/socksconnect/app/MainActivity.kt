@@ -42,7 +42,11 @@ class MainActivity : AppCompatActivity() {
             doStart()
         }
 
-    private val stateListener = ConnectorService.Listener { updateUi() }
+    private val stateListener = object : ConnectorService.Listener {
+        override fun onStateChanged() {
+            updateUi()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
