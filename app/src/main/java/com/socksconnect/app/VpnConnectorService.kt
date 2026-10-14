@@ -286,16 +286,30 @@ class VpnConnectorService : VpnService() {
                 ?: throw IOException(getString(R.string.err_vpn_establish))
             tunnel = fd
             val cfg = File(cacheDir, "tunnel.yml")
-            cfg.writeText(buildConfig())
-            var result = false
+            val hevLog = File(cacheDir, "hev.log")
+            runCatching { hevLog.delete() }
+            cfg.writeText(buildConfig(hevLog.absolutePath))
+            var exitCode = -1
+            var thrown: String? = null
             val hevThread = Thread({
-                result = runCatching { HevTunnel.start(cfg.absolutePath, fd.fd) }
-                    .getOrDefault(false)
+                try {
+                    exitCode = HevTunnel.start(cfg.absolutePath, fd.fd)
+                } catch (t: Throwable) {
+                    thrown = t.message ?: t.javaClass.simpleName
+                }
             }, "HevTunnel")
             hevThread.start()
-            // 等待 hev 进入事件循环；配置/网卡出错时它会立即返回
-            if (sleepWhile(1500)) return false
-            if (!hevThread.isAlive) return result
+            // 轮询等待 hev 进入事件循环；配置或网卡出错时它会立即退出
+            var waited = 0
+            while (!cancelled && hevThread.isAlive && waited < 1500) {
+                sleepWhile(150)
+                waited += 150
+            }
+            if (cancelled) return false
+            if (!hevThread.isAlive) {
+                lastError = describeHevFailure(exitCode, thrown, hevLog)
+                return false
+            }
             connectedAt = System.currentTimeMillis()
             lastError = null
             publishState(State.CONNECTED)
@@ -303,6 +317,9 @@ class VpnConnectorService : VpnService() {
                 hevThread.join()
             } catch (_: InterruptedException) {
                 cancelled = true
+            }
+            if (exitCode != 0 || thrown != null) {
+                lastError = describeHevFailure(exitCode, thrown, hevLog)
             }
             return true
         }
@@ -321,11 +338,12 @@ class VpnConnectorService : VpnService() {
             return builder.establish()
         }
 
-        private fun buildConfig(): String = """
+        // 仅使用官方示例中的配置键，最小化解析失败的可能；
+        // log-file 用于把 hev 的错误暴露到界面状态栏
+        private fun buildConfig(logPath: String): String = """
             tunnel:
               mtu: $TUN_MTU
               ipv4: $TUN_ADDRESS
-              icmp: 'reply'
 
             socks5:
               port: $LOCAL_SOCKS_PORT
@@ -333,9 +351,22 @@ class VpnConnectorService : VpnService() {
               udp: 'udp'
 
             misc:
-              task-stack-size: 24576
-              max-session-count: 1200
+              log-file: $logPath
+              log-level: debug
         """.trimIndent()
+
+        /** 汇总 hev 的退出码、异常信息与日志末尾，便于在状态栏定位失败原因 */
+        private fun describeHevFailure(code: Int, thrown: String?, log: File): String =
+            buildString {
+                append(
+                    if (thrown != null) "hev 启动异常：$thrown"
+                    else "hev 隧道退出（代码 $code）"
+                )
+                runCatching {
+                    val text = log.readText().trim()
+                    if (text.isNotEmpty()) append('\n').append(text.takeLast(400))
+                }
+            }
 
         private fun closeTunnel() {
             runCatching { tunnel?.close() }

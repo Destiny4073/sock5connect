@@ -1,7 +1,7 @@
 #include <jni.h>
 #include "hev-main.h"
 
-JNIEXPORT jboolean JNICALL
+JNIEXPORT jint JNICALL
 Java_com_socksconnect_app_HevTunnel_start (JNIEnv *env, jobject thiz, jstring config_path, jint tun_fd)
 {
     const char *path;
@@ -9,10 +9,10 @@ Java_com_socksconnect_app_HevTunnel_start (JNIEnv *env, jobject thiz, jstring co
 
     path = (*env)->GetStringUTFChars (env, config_path, NULL);
     if (NULL == path)
-        return JNI_FALSE;
+        return -100;
     res = hev_socks5_tunnel_main (path, tun_fd);
     (*env)->ReleaseStringUTFChars (env, config_path, path);
-    return (0 == res) ? JNI_TRUE : JNI_FALSE;
+    return res;
 }
 
 JNIEXPORT void JNICALL
