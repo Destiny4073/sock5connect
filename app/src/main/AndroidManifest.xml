@@ -23,14 +23,16 @@
             </intent-filter>
         </activity>
 
-        <!-- specialUse 类型：与用户指定的代理服务器保持长连接，无 dataSync 类型的 6 小时运行限制 -->
+        <!-- BIND_VPN_SERVICE：仅允许系统绑定（VpnService 要求）；
+             specialUse 类型：保持 VPN 隧道运行，无 dataSync 类型的 6 小时运行限制 -->
         <service
-            android:name=".ConnectorService"
+            android:name=".VpnConnectorService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="与用户指定的 HTTP/HTTPS/SOCKS5 代理服务器保持长连接并自动重连" />
+                android:value="建立 VPN 隧道，把整机流量转发到用户配置的 HTTP/HTTPS/SOCKS5 代理" />
         </service>
     </application>
 </manifest>

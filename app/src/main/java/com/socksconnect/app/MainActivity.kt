@@ -3,18 +3,22 @@ package com.socksconnect.app
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.DynamicColors
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
@@ -36,13 +40,23 @@ class MainActivity : AppCompatActivity() {
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (!granted) {
-                Toast.makeText(this, R.string.notif_perm_hint, Toast.LENGTH_LONG).show()
+            if (granted) {
+                prepareVpnAndStart()
+            } else {
+                showNotificationDisabledDialog()
             }
-            doStart()
         }
 
-    private val stateListener = object : ConnectorService.Listener {
+    private val vpnConsent =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == RESULT_OK) {
+                doStart()
+            } else {
+                Toast.makeText(this, R.string.vpn_denied, Toast.LENGTH_LONG).show()
+            }
+        }
+
+    private val stateListener = object : VpnConnectorService.Listener {
         override fun onStateChanged() {
             updateUi()
         }
@@ -50,6 +64,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppContext.init(this)
         DynamicColors.applyToActivityIfAvailable(this)
         setContentView(R.layout.activity_main)
 
@@ -60,19 +75,19 @@ class MainActivity : AppCompatActivity() {
         btnStop = findViewById(R.id.btn_stop)
         textStatus = findViewById(R.id.text_status)
 
-        dropProtocol.setSimpleItems(ConnectorService.PROTOCOLS)
+        dropProtocol.setSimpleItems(VpnConnectorService.PROTOCOLS)
 
         val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         val savedProto = prefs.getString(KEY_PROTOCOL, null)
-            ?.takeIf { ConnectorService.PROTOCOLS.contains(it) }
+            ?.takeIf { VpnConnectorService.PROTOCOLS.contains(it) }
         dropProtocol.setText(savedProto ?: "SOCKS5", false)
         addressInput.setText(prefs.getString(KEY_ADDRESS, "") ?: "")
 
         btnStart.setOnClickListener { onStartClicked() }
         btnStop.setOnClickListener {
             startService(
-                Intent(this, ConnectorService::class.java)
-                    .setAction(ConnectorService.ACTION_DISCONNECT)
+                Intent(this, VpnConnectorService::class.java)
+                    .setAction(VpnConnectorService.ACTION_DISCONNECT)
             )
         }
 
@@ -88,13 +103,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        ConnectorService.addListener(stateListener)
+        VpnConnectorService.addListener(stateListener)
         updateUi()
     }
 
     override fun onStop() {
         super.onStop()
-        ConnectorService.removeListener(stateListener)
+        VpnConnectorService.removeListener(stateListener)
     }
 
     private fun onStartClicked() {
@@ -111,11 +126,47 @@ class MainActivity : AppCompatActivity() {
             .apply()
         pendingHost = parsed.first
         pendingPort = parsed.second
+        requestNotificationPermissionThenStart()
+    }
+
+    private fun requestNotificationPermissionThenStart() {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        ensureNotificationsEnabledThenStart()
+    }
+
+    private fun ensureNotificationsEnabledThenStart() {
+        if (NotificationManagerCompat.areNotificationsEnabled(this)) {
+            prepareVpnAndStart()
+        } else {
+            // Android 12 及国产 ROM 常默认关闭通知，只能引导用户去系统设置开启
+            showNotificationDisabledDialog()
+        }
+    }
+
+    private fun showNotificationDisabledDialog() {
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.notif_disabled_title)
+            .setMessage(R.string.notif_disabled_msg)
+            .setPositiveButton(R.string.notif_go_settings) { _, _ ->
+                startActivity(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                )
+            }
+            .setNegativeButton(R.string.notif_continue) { _, _ -> prepareVpnAndStart() }
+            .show()
+    }
+
+    private fun prepareVpnAndStart() {
+        val consent = VpnService.prepare(this)
+        if (consent != null) {
+            vpnConsent.launch(consent)
         } else {
             doStart()
         }
@@ -125,41 +176,41 @@ class MainActivity : AppCompatActivity() {
         val host = pendingHost ?: return
         val port = pendingPort
         pendingHost = null
-        val intent = Intent(this, ConnectorService::class.java)
-            .setAction(ConnectorService.ACTION_START)
-            .putExtra(ConnectorService.EXTRA_PROTOCOL, currentProtocol())
-            .putExtra(ConnectorService.EXTRA_HOST, host)
-            .putExtra(ConnectorService.EXTRA_PORT, port)
+        val intent = Intent(this, VpnConnectorService::class.java)
+            .setAction(VpnConnectorService.ACTION_START)
+            .putExtra(VpnConnectorService.EXTRA_PROTOCOL, currentProtocol())
+            .putExtra(VpnConnectorService.EXTRA_HOST, host)
+            .putExtra(VpnConnectorService.EXTRA_PORT, port)
         ContextCompat.startForegroundService(this, intent)
         updateUi()
     }
 
     private fun currentProtocol(): String =
-        dropProtocol.text?.toString()?.takeIf { ConnectorService.PROTOCOLS.contains(it) }
+        dropProtocol.text?.toString()?.takeIf { VpnConnectorService.PROTOCOLS.contains(it) }
             ?: "SOCKS5"
 
     private fun updateUi() {
-        val st = ConnectorService.state
-        val addr = ConnectorService.address
-        val idle = st == ConnectorService.State.DISCONNECTED
+        val st = VpnConnectorService.state
+        val addr = VpnConnectorService.address
+        val idle = st == VpnConnectorService.State.DISCONNECTED
         btnStart.isEnabled = idle
         btnStop.isEnabled = !idle
         dropProtocol.isEnabled = idle
         addressInput.isEnabled = idle
         addressLayout.isEnabled = idle
         textStatus.text = when (st) {
-            ConnectorService.State.DISCONNECTED -> getString(R.string.status_disconnected)
-            ConnectorService.State.CONNECTING ->
+            VpnConnectorService.State.DISCONNECTED -> getString(R.string.status_disconnected)
+            VpnConnectorService.State.CONNECTING ->
                 getString(R.string.status_connecting, addr.orEmpty())
-            ConnectorService.State.CONNECTED -> getString(
+            VpnConnectorService.State.CONNECTED -> getString(
                 R.string.status_connected,
                 addr.orEmpty(),
                 SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-                    .format(Date(ConnectorService.connectedAt))
+                    .format(Date(VpnConnectorService.connectedAt))
             )
-            ConnectorService.State.RECONNECTING -> buildString {
+            VpnConnectorService.State.RECONNECTING -> buildString {
                 append(getString(R.string.status_reconnecting))
-                ConnectorService.lastError?.let { append('\n').append(it) }
+                VpnConnectorService.lastError?.let { append('\n').append(it) }
             }
         }
     }

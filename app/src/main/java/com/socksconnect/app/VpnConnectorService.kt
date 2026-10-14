@@ -4,30 +4,24 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.VpnService
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import java.io.File
 import java.io.IOException
-import java.io.InputStream
-import java.net.ConnectException
-import java.net.InetSocketAddress
-import java.net.Socket
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
-import javax.net.ssl.SSLException
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
-class ConnectorService : Service() {
+/**
+ * 前台 VPN 服务：建立 TUN 网卡并启动 hev-socks5-tunnel，把整机流量经
+ * 本地 SOCKS5 中转（LocalSocksServer）转发到用户配置的 HTTP/HTTPS/SOCKS5 代理。
+ */
+class VpnConnectorService : VpnService() {
 
     enum class State { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING }
 
@@ -46,10 +40,12 @@ class ConnectorService : Service() {
 
         private const val CHANNEL_ID = "connection"
         private const val NOTIFICATION_ID = 1
-        private const val CONNECT_TIMEOUT_MS = 10_000
+        private const val LOCAL_SOCKS_PORT = 10808
+        private const val TUN_ADDRESS = "198.18.0.1"
+        private const val TUN_MTU = 8500
         private const val INITIAL_BACKOFF_MS = 3_000L
         private const val MAX_BACKOFF_MS = 30_000L
-        private const val RETRY_AFTER_DROP_MS = 3_000L
+        private const val RETRY_AFTER_STOP_MS = 3_000L
 
         // 供界面读取的连接状态（单实例服务，随进程存活）
         @Volatile
@@ -89,12 +85,13 @@ class ConnectorService : Service() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var notificationManager: NotificationManager? = null
-    private var worker: Worker? = null
+    private var worker: VpnWorker? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        AppContext.init(this)
         notificationManager = getSystemService(NotificationManager::class.java)
         createChannel()
     }
@@ -136,10 +133,15 @@ class ConnectorService : Service() {
         super.onDestroy()
     }
 
+    override fun onRevoke() {
+        // 系统收回 VPN（用户在设置里断开或启动了其他 VPN）
+        stopWorker()
+    }
+
     private fun startWorker(proto: String, host: String, port: Int) {
         worker?.cancelAndWait()
-        val w = Worker(proto, host, port)
-        val t = Thread(w, "ProxyConnector")
+        val w = VpnWorker(proto, host, port)
+        val t = Thread(w, "VpnWorker")
         w.thread = t
         worker = w
         t.start()
@@ -159,7 +161,7 @@ class ConnectorService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.notif_channel_name),
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_DEFAULT
         )
         channel.description = getString(R.string.notif_channel_desc)
         notificationManager?.createNotificationChannel(channel)
@@ -186,8 +188,8 @@ class ConnectorService : Service() {
         when (st) {
             State.CONNECTED -> {
                 builder.setWhen(connectedAt).setUsesChronometer(true)
-                val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-                    .format(Date(connectedAt))
+                val time = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date(connectedAt))
                 builder.setStyle(
                     NotificationCompat.BigTextStyle()
                         .bigText(getString(R.string.notif_detail, time, addr))
@@ -214,14 +216,14 @@ class ConnectorService : Service() {
     private val disconnectIntent: PendingIntent by lazy {
         PendingIntent.getService(
             this, 0,
-            Intent(this, ConnectorService::class.java).setAction(ACTION_DISCONNECT),
+            Intent(this, VpnConnectorService::class.java).setAction(ACTION_DISCONNECT),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
     }
 
     // 实现 Runnable 而非继承 Thread：Thread 自带的 State 枚举和 getState() 属性
     // 会遮蔽本类的 State 枚举与 companion 里的状态变量
-    private inner class Worker(
+    private inner class VpnWorker(
         private val proto: String,
         private val host: String,
         private val port: Int
@@ -233,59 +235,110 @@ class ConnectorService : Service() {
 
         var thread: Thread? = null
 
-        private var socket: Socket? = null
-        private val socketLock = Any()
+        private var tunnel: ParcelFileDescriptor? = null
+        private var server: LocalSocksServer? = null
 
         fun matches(p: String, h: String, pt: Int) = proto == p && host == h && port == pt
 
         fun cancel() {
             cancelled = true
-            synchronized(socketLock) { runCatching { socket?.close() } }
+            runCatching { HevTunnel.stop() }
+            runCatching { server?.stop() }
+            closeTunnel()
         }
 
         fun cancelAndWait() {
             cancel()
-            thread?.join(1500)
+            thread?.join(3000)
         }
 
         override fun run() {
             var backoff = INITIAL_BACKOFF_MS
             while (!cancelled) {
                 publishState(State.CONNECTING)
-                val s = tryConnect()
-                if (cancelled) {
-                    runCatching { s?.close() }
-                    break
+                var started = false
+                try {
+                    started = runOnce()
+                } catch (e: Exception) {
+                    lastError = Upstreams.describeError(e)
                 }
-                if (s == null) {
+                closeTunnel()
+                runCatching { server?.stop() }
+                if (cancelled) break
+                if (started) {
+                    backoff = INITIAL_BACKOFF_MS
+                    publishState(State.RECONNECTING)
+                    if (sleepWhile(RETRY_AFTER_STOP_MS)) break
+                } else {
                     publishState(State.RECONNECTING)
                     if (sleepWhile(backoff)) break
                     backoff = minOf(backoff * 2, MAX_BACKOFF_MS)
-                    continue
                 }
-                backoff = INITIAL_BACKOFF_MS
-                connectedAt = System.currentTimeMillis()
-                lastError = null
-                publishState(State.CONNECTED)
-                monitor(s)
-                runCatching { s.close() }
-                if (cancelled) break
-                lastError = null
-                publishState(State.RECONNECTING)
-                sleepWhile(RETRY_AFTER_DROP_MS)
             }
         }
 
-        /** 阻塞读取以探测连接存活：对端正常关闭返回 -1，异常关闭抛出，均视为断开 */
-        private fun monitor(s: Socket) {
+        /** @return true 表示 hev 隧道成功运行过（本次运行已结束） */
+        private fun runOnce(): Boolean {
+            val srv = LocalSocksServer(LOCAL_SOCKS_PORT, proto, host, port)
+            server = srv
+            srv.start()
+            val fd = establishTunnel()
+                ?: throw IOException(getString(R.string.err_vpn_establish))
+            tunnel = fd
+            val cfg = File(cacheDir, "tunnel.yml")
+            cfg.writeText(buildConfig())
+            var result = false
+            val hevThread = Thread({
+                result = runCatching { HevTunnel.start(cfg.absolutePath, fd.fd) }
+                    .getOrDefault(false)
+            }, "HevTunnel")
+            hevThread.start()
+            // 等待 hev 进入事件循环；配置/网卡出错时它会立即返回
+            if (sleepWhile(1500)) return false
+            if (!hevThread.isAlive) return result
+            connectedAt = System.currentTimeMillis()
+            lastError = null
+            publishState(State.CONNECTED)
             try {
-                val input = s.getInputStream()
-                val buf = ByteArray(256)
-                while (!cancelled) {
-                    if (input.read(buf) < 0) return
-                }
-            } catch (_: IOException) {
+                hevThread.join()
+            } catch (_: InterruptedException) {
+                cancelled = true
             }
+            return true
+        }
+
+        private fun establishTunnel(): ParcelFileDescriptor? {
+            val builder = VpnService.Builder()
+                .setSession(getString(R.string.app_name))
+                .setMtu(TUN_MTU)
+                .addAddress(TUN_ADDRESS, 32)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("8.8.8.8")
+                .addDnsServer("8.8.4.4")
+            // 本应用流量绕过 VPN，避免本地 SOCKS5 到上游代理的连接形成回环
+            runCatching { builder.addDisallowedApplication(packageName) }
+            return builder.establish()
+        }
+
+        private fun buildConfig(): String = """
+            tunnel:
+              mtu: $TUN_MTU
+              ipv4: $TUN_ADDRESS
+              icmp: 'reply'
+
+            socks5:
+              port: $LOCAL_SOCKS_PORT
+              address: 127.0.0.1
+              udp: 'udp'
+
+            misc:
+              task-stack-size: 24576
+              max-session-count: 1200
+        """.trimIndent()
+
+        private fun closeTunnel() {
+            runCatching { tunnel?.close() }
+            tunnel = null
         }
 
         private fun sleepWhile(ms: Long): Boolean {
@@ -300,78 +353,6 @@ class ConnectorService : Service() {
                 remaining -= step
             }
             return cancelled
-        }
-
-        private fun tryConnect(): Socket? {
-            var s: Socket? = null
-            try {
-                val raw = Socket()
-                s = raw
-                synchronized(socketLock) { socket = raw }
-                raw.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-                raw.tcpNoDelay = true
-                raw.keepAlive = true
-                raw.soTimeout = CONNECT_TIMEOUT_MS
-                val result = when (proto) {
-                    "HTTPS" -> {
-                        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-                        val tls = factory.createSocket(raw, host, port, true) as SSLSocket
-                        tls.startHandshake()
-                        synchronized(socketLock) { socket = tls }
-                        tls.soTimeout = 0
-                        tls
-                    }
-                    "SOCKS5" -> {
-                        socksHandshake(raw)
-                        raw.soTimeout = 0
-                        raw
-                    }
-                    else -> {
-                        raw.soTimeout = 0
-                        raw
-                    }
-                }
-                return result
-            } catch (e: Exception) {
-                lastError = describeError(e)
-                runCatching { s?.close() }
-                synchronized(socketLock) { socket = null }
-                return null
-            }
-        }
-
-        /** SOCKS5 免认证（NO-AUTH）方式协商 */
-        private fun socksHandshake(s: Socket) {
-            val input = s.getInputStream()
-            val output = s.getOutputStream()
-            output.write(byteArrayOf(0x05, 0x01, 0x00))
-            output.flush()
-            val head = ByteArray(2)
-            readFully(input, head)
-            if (head[0] != 0x05.toByte()) throw IOException(getString(R.string.err_not_socks5))
-            when (head[1]) {
-                0x00.toByte() -> Unit
-                0xFF.toByte(), 0x02.toByte() ->
-                    throw IOException(getString(R.string.err_socks_auth))
-                else -> throw IOException(getString(R.string.err_not_socks5))
-            }
-        }
-
-        private fun readFully(input: InputStream, buf: ByteArray) {
-            var off = 0
-            while (off < buf.size) {
-                val n = input.read(buf, off, buf.size - off)
-                if (n < 0) throw IOException(getString(R.string.err_not_socks5))
-                off += n
-            }
-        }
-
-        private fun describeError(e: Exception): String = when (e) {
-            is UnknownHostException -> getString(R.string.err_unknown_host)
-            is SocketTimeoutException -> getString(R.string.err_timeout)
-            is ConnectException -> getString(R.string.err_refused)
-            is SSLException -> getString(R.string.err_tls)
-            else -> getString(R.string.err_io, e.message ?: e.javaClass.simpleName)
         }
 
         private fun publishState(st: State) {

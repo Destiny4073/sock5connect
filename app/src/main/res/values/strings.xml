@@ -9,12 +9,12 @@
 
     <string name="status_disconnected">未连接</string>
     <string name="status_connecting">正在连接 %1$s …</string>
-    <string name="status_connected">已连接 %1$s（%2$s）</string>
+    <string name="status_connected">全局代理中 %1$s（%2$s）</string>
     <string name="status_reconnecting">连接已断开，正在重试…</string>
 
     <string name="notif_channel_name">连接状态</string>
     <string name="notif_channel_desc">在通知栏显示当前代理连接状态</string>
-    <string name="notif_connected">已连接 · %1$s</string>
+    <string name="notif_connected">全局代理中 · %1$s</string>
     <string name="notif_connecting">正在连接…</string>
     <string name="notif_reconnecting">连接已断开，正在重试…</string>
     <string name="notif_detail">连接时间：%1$s\n服务器：%2$s</string>
@@ -23,6 +23,13 @@
 
     <string name="error_invalid_address">请输入正确的 IP:端口，例如 1.2.3.4:1080</string>
     <string name="notif_perm_hint">未授予通知权限，通知栏将不会显示连接状态</string>
+    <string name="notif_disabled_title">通知权限未开启</string>
+    <string name="notif_disabled_msg">开启通知后才能在通知栏查看连接状态、使用「断开连接」按钮。开启后请返回本应用重新点击「开始连接」。</string>
+    <string name="notif_go_settings">去开启</string>
+    <string name="notif_continue">仍然继续</string>
+
+    <string name="vpn_denied">VPN 权限被拒绝，无法代理整机流量</string>
+    <string name="err_vpn_establish">VPN 网卡建立失败（权限被撤销或系统限制）</string>
 
     <string name="err_unknown_host">无法解析主机名</string>
     <string name="err_timeout">连接超时</string>
@@ -30,5 +37,7 @@
     <string name="err_tls">TLS 握手失败（证书不受信任，或该端口不是 HTTPS 代理）</string>
     <string name="err_socks_auth">SOCKS5 服务器要求用户名/密码认证，暂不支持</string>
     <string name="err_not_socks5">对端不是 SOCKS5 代理服务器</string>
+    <string name="err_socks_reply">上游 SOCKS5 代理拒绝转发（代码 %1$d）</string>
+    <string name="err_http_connect">上游代理拒绝 CONNECT 请求（%1$s）</string>
     <string name="err_io">网络错误：%1$s</string>
 </resources>

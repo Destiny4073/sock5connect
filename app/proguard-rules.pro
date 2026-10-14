@@ -1,3 +1,5 @@
-# Material / AppCompat 自带 consumer 规则，本项目无需额外 keep。
-# 如需在混淆包中保留行号便于排查崩溃，可取消下一行注释：
-# -keepattributes SourceFile,LineNumberTable
+# Material / AppCompat 自带 consumer 规则。
+# JNI 通过符号名查找 native 方法，必须保留类名与方法名：
+-keepclasseswithmembernames class com.socksconnect.app.HevTunnel {
+    native <methods>;
+}

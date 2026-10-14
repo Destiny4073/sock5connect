@@ -10,3 +10,5 @@ build/
 signing/
 *.jks
 *.keystore
+build-native/
+app/src/main/jniLibs/
