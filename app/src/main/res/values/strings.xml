@@ -11,6 +11,7 @@
     <string name="status_connecting">正在连接 %1$s …</string>
     <string name="status_connected">全局代理中 %1$s（%2$s）</string>
     <string name="status_reconnecting">连接已断开，正在重试…</string>
+    <string name="self_testing">自检中…</string>
 
     <string name="notif_channel_name">连接状态</string>
     <string name="notif_channel_desc">在通知栏显示当前代理连接状态</string>

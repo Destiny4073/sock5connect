@@ -13,8 +13,12 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
 import java.io.File
 import java.io.IOException
+import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -66,6 +70,11 @@ class VpnConnectorService : VpnService() {
 
         @Volatile
         var lastError: String? = null
+            internal set
+
+        /** 连接成功后的链路自检结果（"自检: 代理通道✓ DNS✓" 或失败原因） */
+        @Volatile
+        var selfTestResult: String? = null
             internal set
 
         private val listeners = CopyOnWriteArrayList<Listener>()
@@ -280,6 +289,7 @@ class VpnConnectorService : VpnService() {
 
         /** @return true 表示 hev 隧道成功运行过（本次运行已结束） */
         private fun runOnce(): Boolean {
+            selfTestResult = null
             val srv = LocalSocksServer(LOCAL_SOCKS_PORT, proto, host, port)
             server = srv
             srv.start()
@@ -314,6 +324,13 @@ class VpnConnectorService : VpnService() {
             connectedAt = System.currentTimeMillis()
             lastError = null
             publishState(State.CONNECTED)
+            Thread({
+                val result = runSelfTest()
+                if (!cancelled) {
+                    selfTestResult = result
+                    mainHandler.post { notifyListeners() }
+                }
+            }, "SelfTest").start()
             // 库内部线程退出即隧道结束（被停止或运行出错）
             while (!cancelled && HevTunnel.TProxyIsRunning()) {
                 sleepWhile(250)
@@ -364,6 +381,85 @@ class VpnConnectorService : VpnService() {
                     if (text.isNotEmpty()) append('\n').append(text.takeLast(400))
                 }
             }
+
+        /** 连接建立后自检两条链路：代理通道（本地 SOCKS5 → 上游 CONNECT 1.1.1.1:443）与 DNS（DoH） */
+        private fun runSelfTest(): String {
+            val proxy = testProxyChannel()
+            val dns = testDns()
+            var result = "自检: $proxy $dns"
+            if (!proxy.second || !dns.second) {
+                runCatching {
+                    val text = File(cacheDir, "hev.log").readText().trim()
+                    if (text.isNotEmpty()) result += "\n" + text.takeLast(300)
+                }
+            }
+            return result
+        }
+
+        private fun testProxyChannel(): Pair<String, Boolean> {
+            var s: Socket? = null
+            return try {
+                s = Socket("127.0.0.1", LOCAL_SOCKS_PORT).apply { soTimeout = 8000 }
+                val out = s.getOutputStream()
+                val input = DataInputStream(BufferedInputStream(s.getInputStream()))
+                out.write(byteArrayOf(0x05, 0x01, 0x00))
+                val greet = ByteArray(2)
+                input.readFully(greet)
+                if (greet[1] != 0x00.toByte()) {
+                    return "代理通道✗(本地中转拒绝)" to false
+                }
+                val addr = Upstreams.encodeSocksAddress("1.1.1.1", 443)
+                val req = ByteArray(3 + addr.size)
+                req[0] = 0x05
+                req[1] = 0x01
+                req[2] = 0x00
+                addr.copyInto(req, 3)
+                out.write(req)
+                val rep = ByteArray(4)
+                input.readFully(rep)
+                val skip = when (rep[3].toInt()) {
+                    0x01 -> 6
+                    0x04 -> 18
+                    0x03 -> input.read() + 2
+                    else -> 0
+                }
+                if (skip > 0) {
+                    input.readFully(ByteArray(skip))
+                }
+                if (rep[1] != 0x00.toByte()) {
+                    // 转发失败的具体原因已由 LocalSocksServer 写入 lastError
+                    "代理通道✗(${VpnConnectorService.lastError ?: "上游拒绝"})" to false
+                } else {
+                    "代理通道✓" to true
+                }
+            } catch (e: Exception) {
+                "代理通道✗(${e.message ?: e.javaClass.simpleName})" to false
+            } finally {
+                runCatching { s?.close() }
+            }
+        }
+
+        private fun testDns(): Pair<String, Boolean> {
+            val resolver = DohResolver(proto, host, port)
+            return if (resolver.query(buildDnsQuery("www.google.com")) != null) {
+                "DNS✓" to true
+            } else {
+                "DNS✗(${resolver.lastError ?: "无响应"})" to false
+            }
+        }
+
+        private fun buildDnsQuery(name: String): ByteArray {
+            val header = byteArrayOf(
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            )
+            val labels = ByteArrayOutputStream()
+            for (label in name.split('.')) {
+                labels.write(label.length)
+                labels.write(label.toByteArray(Charsets.US_ASCII))
+            }
+            labels.write(0)
+            return header + labels.toByteArray() + byteArrayOf(0x00, 0x01, 0x00, 0x01)
+        }
 
         private fun closeTunnel() {
             runCatching { tunnel?.close() }

@@ -18,6 +18,11 @@ internal class DohResolver(
 ) {
     private val cache = LinkedHashMap<String, Pair<Long, ByteArray>>()
 
+    /** 最近一次查询失败的原因（成功后清空） */
+    @Volatile
+    var lastError: String? = null
+        private set
+
     /** 返回原始 DNS 响应报文，失败返回 null（调用方静默丢弃，客户端会重试） */
     fun query(dnsPayload: ByteArray): ByteArray? {
         val key = Base64.encodeToString(dnsPayload, Base64.NO_WRAP)
@@ -29,9 +34,11 @@ internal class DohResolver(
         }
         val resp = try {
             doQuery(dnsPayload)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            lastError = e.message ?: e.javaClass.simpleName
             return null
         }
+        lastError = null
         synchronized(cache) {
             if (cache.size >= CACHE_MAX_ENTRIES) {
                 val it = cache.keys.iterator()

@@ -106,6 +106,7 @@ internal class LocalSocksServer(
             return
         }
         tcpSockets.add(upstream)
+        VpnConnectorService.lastError = null
         runCatching {
             out.write(replyBytes(0x00, "0.0.0.0", 0))
             out.flush()
@@ -130,16 +131,16 @@ internal class LocalSocksServer(
                     val packet = DatagramPacket(buf, buf.size)
                     udp.receive(packet)
                     if ((buf[2].toInt() and 0xFF) != 0) continue // 不支持分片
-                    val header = parseUdpHeader(buf, packet.length)
+                    // 立即快照整份数据报，避免与 DoH 应答任务竞争接收缓冲区
+                    val datagram = buf.copyOf(packet.length)
+                    val header = parseUdpHeader(datagram, datagram.size)
                     if (header.dstPort != DNS_PORT) continue // 仅转发 DNS
-                    val payload = buf.copyOfRange(header.payloadStart, packet.length)
+                    val payload = datagram.copyOfRange(header.payloadStart, datagram.size)
                     val addr = packet.address
                     val port = packet.port
                     dns.execute {
                         val resp = doh.query(payload) ?: return@execute
-                        val respPacket = ByteArray(header.payloadStart + resp.size)
-                        System.arraycopy(buf, 0, respPacket, 0, header.payloadStart)
-                        System.arraycopy(resp, 0, respPacket, header.payloadStart, resp.size)
+                        val respPacket = datagram.copyOf(header.payloadStart) + resp
                         runCatching {
                             udp.send(DatagramPacket(respPacket, respPacket.size, addr, port))
                         }

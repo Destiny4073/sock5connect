@@ -202,12 +202,19 @@ class MainActivity : AppCompatActivity() {
             VpnConnectorService.State.DISCONNECTED -> getString(R.string.status_disconnected)
             VpnConnectorService.State.CONNECTING ->
                 getString(R.string.status_connecting, addr.orEmpty())
-            VpnConnectorService.State.CONNECTED -> getString(
-                R.string.status_connected,
-                addr.orEmpty(),
-                SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-                    .format(Date(VpnConnectorService.connectedAt))
-            )
+            VpnConnectorService.State.CONNECTED -> buildString {
+                append(
+                    getString(
+                        R.string.status_connected,
+                        addr.orEmpty(),
+                        SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                            .format(Date(VpnConnectorService.connectedAt))
+                    )
+                )
+                VpnConnectorService.lastError?.let { append('\n').append(it) }
+                append('\n')
+                append(VpnConnectorService.selfTestResult ?: getString(R.string.self_testing))
+            }
             VpnConnectorService.State.RECONNECTING -> buildString {
                 append(getString(R.string.status_reconnecting))
                 VpnConnectorService.lastError?.let { append('\n').append(it) }
