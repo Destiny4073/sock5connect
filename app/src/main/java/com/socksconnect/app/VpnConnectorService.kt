@@ -308,7 +308,8 @@ class VpnConnectorService : VpnService() {
         }
 
         private fun establishTunnel(): ParcelFileDescriptor? {
-            val builder = VpnService.Builder()
+            // Builder 是 VpnService 的内部类，须以服务实例为接收者创建
+        val builder = Builder()
                 .setSession(getString(R.string.app_name))
                 .setMtu(TUN_MTU)
                 .addAddress(TUN_ADDRESS, 32)

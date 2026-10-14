@@ -141,7 +141,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureNotificationsEnabledThenStart() {
-        if (NotificationManagerCompat.areNotificationsEnabled(this)) {
+        if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
             prepareVpnAndStart()
         } else {
             // Android 12 及国产 ROM 常默认关闭通知，只能引导用户去系统设置开启
