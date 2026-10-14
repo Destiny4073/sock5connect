@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">代理连接</string>
+
+    <string name="protocol_hint">协议</string>
+    <string name="address_hint">IP:端口</string>
+    <string name="start_connect">开始连接</string>
+    <string name="stop_connect">停止连接</string>
+
+    <string name="status_disconnected">未连接</string>
+    <string name="status_connecting">正在连接 %1$s …</string>
+    <string name="status_connected">已连接 %1$s（%2$s）</string>
+    <string name="status_reconnecting">连接已断开，正在重试…</string>
+
+    <string name="notif_channel_name">连接状态</string>
+    <string name="notif_channel_desc">在通知栏显示当前代理连接状态</string>
+    <string name="notif_connected">已连接 · %1$s</string>
+    <string name="notif_connecting">正在连接…</string>
+    <string name="notif_reconnecting">连接已断开，正在重试…</string>
+    <string name="notif_detail">连接时间：%1$s\n服务器：%2$s</string>
+    <string name="notif_detail_fail">上次失败：%1$s\n目标：%2$s</string>
+    <string name="action_disconnect">断开连接</string>
+
+    <string name="error_invalid_address">请输入正确的 IP:端口，例如 1.2.3.4:1080</string>
+    <string name="notif_perm_hint">未授予通知权限，通知栏将不会显示连接状态</string>
+
+    <string name="err_unknown_host">无法解析主机名</string>
+    <string name="err_timeout">连接超时</string>
+    <string name="err_refused">无法建立连接（端口未开放或被拒绝）</string>
+    <string name="err_tls">TLS 握手失败（证书不受信任，或该端口不是 HTTPS 代理）</string>
+    <string name="err_socks_auth">SOCKS5 服务器要求用户名/密码认证，暂不支持</string>
+    <string name="err_not_socks5">对端不是 SOCKS5 代理服务器</string>
+    <string name="err_io">网络错误：%1$s</string>
+</resources>
