@@ -259,8 +259,9 @@ class VpnConnectorService : VpnService() {
                 var started = false
                 try {
                     started = runOnce()
-                } catch (e: Exception) {
-                    lastError = Upstreams.describeError(e)
+                } catch (t: Throwable) {
+                    // 捕获 Throwable：JNI 类初始化失败等 Error 不允许杀死进程
+                    lastError = "启动异常：${t.message ?: t.javaClass.simpleName}"
                 }
                 closeTunnel()
                 runCatching { server?.stop() }
@@ -289,7 +290,13 @@ class VpnConnectorService : VpnService() {
             val hevLog = File(cacheDir, "hev.log")
             runCatching { hevLog.delete() }
             cfg.writeText(buildConfig(hevLog.absolutePath))
-            if (!HevTunnel.TProxyStartService(cfg.absolutePath, fd.fd)) {
+            val started = try {
+                HevTunnel.TProxyStartService(cfg.absolutePath, fd.fd)
+            } catch (t: Throwable) {
+                lastError = "hev 启动异常：${t.message ?: t.javaClass.simpleName}"
+                return false
+            }
+            if (!started) {
                 lastError = "hev 启动失败（内部线程创建失败）"
                 return false
             }
