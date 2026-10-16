@@ -20,13 +20,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 本地 SOCKS5 服务器（127.0.0.1），作为 hev-socks5-tunnel 的上游：
  * - CONNECT：转发到用户配置的 HTTP/HTTPS/SOCKS5 代理
- * - UDP ASSOCIATE：仅转发目标端口 53 的 DNS 查询（经上游 DoH 解析后回包），其余 UDP 丢弃
+ * - UDP ASSOCIATE：仅转发目标端口 53 的 DNS 查询，其余 UDP 丢弃
+ * - fake-IP 模式：DNS 本地代答假 IP（FakeDns），CONNECT 时把假 IP 还原为域名按域名转发；
+ *   并拒绝 DoT(853)，让系统私人 DNS 回落到明文 53 被劫持
  */
 internal class LocalSocksServer(
     private val port: Int,
     private val proto: String,
     private val upstreamHost: String,
-    private val upstreamPort: Int
+    private val upstreamPort: Int,
+    private val fakeIpEnabled: Boolean = false
 ) {
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -86,7 +89,14 @@ internal class LocalSocksServer(
             input.readUnsignedByte() // RSV
             val target = readAddress(input)
             when (cmd) {
-                CMD_CONNECT -> handleConnect(client, out, target)
+                CMD_CONNECT -> {
+                    // 拒绝 DoT：系统私人 DNS 会回落到明文 53，从而被本服务劫持进 fake-IP 链路
+                    if (fakeIpEnabled && target.second == DOT_PORT) {
+                        runCatching { out.write(replyBytes(0x05, "0.0.0.0", 0)) }
+                        return
+                    }
+                    handleConnect(client, out, target)
+                }
                 CMD_UDP_ASSOCIATE -> handleUdpAssociate(client, out, input)
                 else -> out.write(replyBytes(0x07, "0.0.0.0", 0))
             }
@@ -98,8 +108,14 @@ internal class LocalSocksServer(
     }
 
     private fun handleConnect(client: Socket, out: OutputStream, target: Pair<String, Int>) {
+        // fake-IP 模式：把劫持 DNS 时记录的假 IP 还原为域名，按域名向上游转发
+        val (host, port) = if (fakeIpEnabled) {
+            FakeIpTable.lookup(target.first)?.let { it to target.second } ?: target
+        } else {
+            target
+        }
         val upstream = try {
-            Upstreams.connectThrough(proto, upstreamHost, upstreamPort, target.first, target.second)
+            Upstreams.connectThrough(proto, upstreamHost, upstreamPort, host, port)
         } catch (e: Exception) {
             VpnConnectorService.lastError = Upstreams.describeError(e)
             runCatching { out.write(replyBytes(0x04, "0.0.0.0", 0)) }
@@ -139,7 +155,12 @@ internal class LocalSocksServer(
                     val addr = packet.address
                     val port = packet.port
                     dns.execute {
-                        val resp = doh.query(payload) ?: return@execute
+                        val resp: ByteArray? = if (fakeIpEnabled) {
+                            FakeDns.tryAnswer(payload) ?: doh.query(payload)
+                        } else {
+                            doh.query(payload)
+                        }
+                        if (resp == null) return@execute
                         val respPacket = datagram.copyOf(header.payloadStart) + resp
                         runCatching {
                             udp.send(DatagramPacket(respPacket, respPacket.size, addr, port))
@@ -238,6 +259,7 @@ internal class LocalSocksServer(
         private const val CMD_CONNECT = 0x01
         private const val CMD_UDP_ASSOCIATE = 0x03
         private const val DNS_PORT = 53
+        private const val DOT_PORT = 853
         private const val MAX_SESSIONS = 128
         private const val DNS_THREADS = 4
         private const val BUFFER_SIZE = 16 * 1024

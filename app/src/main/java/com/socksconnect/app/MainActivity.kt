@@ -24,6 +24,7 @@ import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.DynamicColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.material.MaterialSwitch
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
@@ -36,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var dropProtocol: MaterialAutoCompleteTextView
     private lateinit var addressLayout: TextInputLayout
     private lateinit var addressInput: TextInputEditText
+    private lateinit var switchFakeIp: MaterialSwitch
     private lateinit var btnStart: MaterialButton
     private lateinit var btnStop: MaterialButton
     private lateinit var textStatus: TextView
@@ -51,6 +53,7 @@ class MainActivity : AppCompatActivity() {
 
     private var pendingHost: String? = null
     private var pendingPort = 0
+    private var pendingFakeIp = true
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -85,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         dropProtocol = findViewById(R.id.drop_protocol)
         addressLayout = findViewById(R.id.address_layout)
         addressInput = findViewById(R.id.edit_address)
+        switchFakeIp = findViewById(R.id.switch_fakeip)
         btnStart = findViewById(R.id.btn_start)
         btnStop = findViewById(R.id.btn_stop)
         textStatus = findViewById(R.id.text_status)
@@ -97,6 +101,7 @@ class MainActivity : AppCompatActivity() {
             ?.takeIf { VpnConnectorService.PROTOCOLS.contains(it) }
         dropProtocol.setText(savedProto ?: "SOCKS5", false)
         addressInput.setText(prefs.getString(KEY_ADDRESS, "") ?: "")
+        switchFakeIp.isChecked = prefs.getBoolean(KEY_FAKEIP, true)
 
         btnStart.setOnClickListener { onStartClicked() }
         btnStop.setOnClickListener {
@@ -160,9 +165,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         addressLayout.error = null
+        pendingFakeIp = switchFakeIp.isChecked
         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
             .putString(KEY_PROTOCOL, currentProtocol())
             .putString(KEY_ADDRESS, text)
+            .putBoolean(KEY_FAKEIP, pendingFakeIp)
             .apply()
         pendingHost = parsed.first
         pendingPort = parsed.second
@@ -221,6 +228,7 @@ class MainActivity : AppCompatActivity() {
             .putExtra(VpnConnectorService.EXTRA_PROTOCOL, currentProtocol())
             .putExtra(VpnConnectorService.EXTRA_HOST, host)
             .putExtra(VpnConnectorService.EXTRA_PORT, port)
+            .putExtra(VpnConnectorService.EXTRA_FAKEIP, pendingFakeIp)
         ContextCompat.startForegroundService(this, intent)
         updateUi()
     }
@@ -238,6 +246,7 @@ class MainActivity : AppCompatActivity() {
         dropProtocol.isEnabled = idle
         addressInput.isEnabled = idle
         addressLayout.isEnabled = idle
+        switchFakeIp.isEnabled = idle
         textStatus.text = when (st) {
             VpnConnectorService.State.DISCONNECTED -> getString(R.string.status_disconnected)
             VpnConnectorService.State.CONNECTING ->
@@ -288,5 +297,6 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "settings"
         private const val KEY_PROTOCOL = "protocol"
         private const val KEY_ADDRESS = "address"
+        private const val KEY_FAKEIP = "fake_ip"
     }
 }

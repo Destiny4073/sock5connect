@@ -40,6 +40,7 @@ class VpnConnectorService : VpnService() {
         const val EXTRA_PROTOCOL = "extra_protocol"
         const val EXTRA_HOST = "extra_host"
         const val EXTRA_PORT = "extra_port"
+        const val EXTRA_FAKEIP = "extra_fakeip"
 
         val PROTOCOLS = arrayOf("HTTP", "HTTPS", "SOCKS5")
 
@@ -52,6 +53,9 @@ class VpnConnectorService : VpnService() {
         private const val MAX_BACKOFF_MS = 30_000L
         private const val RETRY_AFTER_STOP_MS = 3_000L
         private const val RAM_REFRESH_MS = 3_000L
+
+        /** fake-IP 模式自检用的域名：走完整「假 IP → 域名 → 上游 CONNECT」链路 */
+        private const val SELF_TEST_DOMAIN = "www.google.com"
 
         // 供界面读取的连接状态（单实例服务，随进程存活）
         @Volatile
@@ -125,17 +129,18 @@ class VpnConnectorService : VpnService() {
                     .takeIf { PROTOCOLS.contains(it) } ?: "SOCKS5"
                 val host = intent.getStringExtra(EXTRA_HOST)
                 val port = intent.getIntExtra(EXTRA_PORT, -1)
+                val fakeIp = intent.getBooleanExtra(EXTRA_FAKEIP, true)
                 if (host.isNullOrEmpty() || port !in 1..65535) {
                     stopWorker()
                     return START_NOT_STICKY
                 }
-                val same = worker?.let { !it.cancelled && it.matches(proto, host, port) } == true
+                val same = worker?.let { !it.cancelled && it.matches(proto, host, port, fakeIp) } == true
                 protocol = proto
                 address = "$host:$port"
                 lastError = null
                 if (!same) {
                     state = State.CONNECTING
-                    startWorker(proto, host, port)
+                    startWorker(proto, host, port, fakeIp)
                 }
                 ServiceCompat.startForeground(
                     this, NOTIFICATION_ID, buildNotification(state),
@@ -163,9 +168,9 @@ class VpnConnectorService : VpnService() {
         stopWorker()
     }
 
-    private fun startWorker(proto: String, host: String, port: Int) {
+    private fun startWorker(proto: String, host: String, port: Int, fakeIp: Boolean) {
         worker?.cancelAndWait()
-        val w = VpnWorker(proto, host, port)
+        val w = VpnWorker(proto, host, port, fakeIp)
         val t = Thread(w, "VpnWorker")
         w.thread = t
         worker = w
@@ -255,7 +260,8 @@ class VpnConnectorService : VpnService() {
     private inner class VpnWorker(
         private val proto: String,
         private val host: String,
-        private val port: Int
+        private val port: Int,
+        private val fakeIp: Boolean
     ) : Runnable {
 
         @Volatile
@@ -267,7 +273,8 @@ class VpnConnectorService : VpnService() {
         private var tunnel: ParcelFileDescriptor? = null
         private var server: LocalSocksServer? = null
 
-        fun matches(p: String, h: String, pt: Int) = proto == p && host == h && port == pt
+        fun matches(p: String, h: String, pt: Int, fp: Boolean) =
+            proto == p && host == h && port == pt && fakeIp == fp
 
         fun cancel() {
             cancelled = true
@@ -310,7 +317,8 @@ class VpnConnectorService : VpnService() {
         /** @return true 表示 hev 隧道成功运行过（本次运行已结束） */
         private fun runOnce(): Boolean {
             selfTestResult = null
-            val srv = LocalSocksServer(LOCAL_SOCKS_PORT, proto, host, port)
+            FakeIpTable.clear()
+            val srv = LocalSocksServer(LOCAL_SOCKS_PORT, proto, host, port, fakeIp)
             server = srv
             srv.start()
             val fd = establishTunnel()
@@ -402,12 +410,26 @@ class VpnConnectorService : VpnService() {
                 }
             }
 
-        /** 连接建立后自检两条链路：代理通道（本地 SOCKS5 → 上游 CONNECT 1.1.1.1:443）与 DNS（DoH） */
+        /** 连接建立后自检链路：
+         *  fake-IP 模式：把自检域名分配一个假 IP 后按完整链路 CONNECT——本地中转
+         *  会把它还原为域名、按域名转发上游（上游应答 CONNECT 成功即代表节点出口
+         *  已按域名解析并连上目标），DNS 与代理通道一次全验；
+         *  传统模式：分别测代理通道（CONNECT 1.1.1.1:443）与 DNS（DoH） */
         private fun runSelfTest(): String {
-            val proxy = testProxyChannel()
-            val dns = testDns()
-            var result = "自检: $proxy $dns"
-            if (!proxy.second || !dns.second) {
+            var result: String
+            val ok: Boolean
+            if (fakeIp) {
+                val fakeIpAddr = FakeIpTable.allocate(SELF_TEST_DOMAIN)
+                val proxy = testConnect(fakeIpAddr, 443)
+                ok = proxy.second
+                result = "自检: $proxy " + if (ok) "DNS✓(fake-IP)" else "DNS✗(链路未通)"
+            } else {
+                val proxy = testConnect("1.1.1.1", 443)
+                val dns = testDns()
+                ok = proxy.second && dns.second
+                result = "自检: $proxy $dns"
+            }
+            if (!ok) {
                 runCatching {
                     val text = File(cacheDir, "hev.log").readText().trim()
                     if (text.isNotEmpty()) result += "\n" + text.takeLast(300)
@@ -416,7 +438,8 @@ class VpnConnectorService : VpnService() {
             return result
         }
 
-        private fun testProxyChannel(): Pair<String, Boolean> {
+        /** 通过本地 SOCKS5 中转发起一次 CONNECT，返回「代理通道✓/✗(原因)」 */
+        private fun testConnect(targetHost: String, targetPort: Int): Pair<String, Boolean> {
             var s: Socket? = null
             return try {
                 s = Socket("127.0.0.1", LOCAL_SOCKS_PORT).apply { soTimeout = 8000 }
@@ -428,7 +451,7 @@ class VpnConnectorService : VpnService() {
                 if (greet[1] != 0x00.toByte()) {
                     return "代理通道✗(本地中转拒绝)" to false
                 }
-                val addr = Upstreams.encodeSocksAddress("1.1.1.1", 443)
+                val addr = Upstreams.encodeSocksAddress(targetHost, targetPort)
                 val req = ByteArray(3 + addr.size)
                 req[0] = 0x05
                 req[1] = 0x01

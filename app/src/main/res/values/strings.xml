@@ -4,6 +4,8 @@
 
     <string name="protocol_hint">协议</string>
     <string name="address_hint">IP:端口</string>
+    <string name="fakeip_title">Fake-IP 模式（推荐）</string>
+    <string name="fakeip_summary">DNS 回应假 IP 并按域名转发，规避部分节点无法直连目标 IP 的问题；重新连接后生效</string>
     <string name="start_connect">开始连接</string>
     <string name="stop_connect">停止连接</string>
 

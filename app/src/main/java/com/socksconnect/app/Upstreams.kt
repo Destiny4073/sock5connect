@@ -123,21 +123,25 @@ internal object Upstreams {
         }
     }
 
+    // 仅字面量 IP 才做地址解析；域名一律按 ATYP=0x03 原样透传，
+    // 避免对域名调用 InetAddress.getByName 触发本地解析（fake-IP 下会解析回假 IP）
+    private val IPV4_LITERAL = Regex("^(?:\\d{1,3}\\.){3}\\d{1,3}$")
+
     /** 目标地址编码为 SOCKS5 请求中的 ATYP + ADDR + PORT */
     internal fun encodeSocksAddress(host: String, port: Int): ByteArray {
         val tail = byteArrayOf(
             ((port shr 8) and 0xFF).toByte(),
             (port and 0xFF).toByte()
         )
-        val ip = runCatching { InetAddress.getByName(host) }.getOrNull()
-        return when (ip) {
-            is Inet4Address -> byteArrayOf(0x01) + ip.address + tail
-            is Inet6Address -> byteArrayOf(0x04) + ip.address + tail
-            else -> {
-                val name = host.toByteArray(Charsets.US_ASCII)
-                byteArrayOf(0x03, name.size.toByte()) + name + tail
-            }
+        if (IPV4_LITERAL.matches(host)) {
+            val ip = runCatching { InetAddress.getByName(host) }.getOrNull()
+            if (ip is Inet4Address) return byteArrayOf(0x01) + ip.address + tail
+        } else if (host.contains(':')) {
+            val ip = runCatching { InetAddress.getByName(host) }.getOrNull()
+            if (ip is Inet6Address) return byteArrayOf(0x04) + ip.address + tail
         }
+        val name = host.toByteArray(Charsets.US_ASCII)
+        return byteArrayOf(0x03, name.size.toByte()) + name + tail
     }
 
     /** 读取到 "\r\n\r\n" 为止的头部块（含结尾空行） */
