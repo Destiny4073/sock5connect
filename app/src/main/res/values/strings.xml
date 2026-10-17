@@ -26,6 +26,11 @@
     <string name="notif_detail_fail">上次失败：%1$s\n目标：%2$s</string>
     <string name="action_disconnect">断开连接</string>
 
+    <string name="autoapp_hint">连接成功后自动打开</string>
+    <string name="autoapp_none">无</string>
+    <string name="autoapp_opened">自检通过，已自动打开 %1$s</string>
+    <string name="autoapp_open_failed">无法自动打开所选应用（可能已卸载）</string>
+
     <string name="error_invalid_address">请输入正确的 IP:端口，例如 1.2.3.4:1080</string>
     <string name="notif_perm_hint">未授予通知权限，通知栏将不会显示连接状态</string>
     <string name="notif_disabled_title">通知权限未开启</string>

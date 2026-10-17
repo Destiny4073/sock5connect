@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import java.io.BufferedInputStream
@@ -41,6 +42,9 @@ class VpnConnectorService : VpnService() {
         const val EXTRA_HOST = "extra_host"
         const val EXTRA_PORT = "extra_port"
         const val EXTRA_FAKEIP = "extra_fakeip"
+
+        /** 连接成功且自检通过后要自动打开的应用包名；空串表示不自动打开 */
+        const val EXTRA_AUTOLAUNCH = "extra_auto_launch"
 
         val PROTOCOLS = arrayOf("HTTP", "HTTPS", "SOCKS5")
 
@@ -130,6 +134,8 @@ class VpnConnectorService : VpnService() {
                 val host = intent.getStringExtra(EXTRA_HOST)
                 val port = intent.getIntExtra(EXTRA_PORT, -1)
                 val fakeIp = intent.getBooleanExtra(EXTRA_FAKEIP, true)
+                val autoLaunch = intent.getStringExtra(EXTRA_AUTOLAUNCH)
+                    ?.takeIf { it.isNotEmpty() }
                 if (host.isNullOrEmpty() || port !in 1..65535) {
                     stopWorker()
                     return START_NOT_STICKY
@@ -140,7 +146,7 @@ class VpnConnectorService : VpnService() {
                 lastError = null
                 if (!same) {
                     state = State.CONNECTING
-                    startWorker(proto, host, port, fakeIp)
+                    startWorker(proto, host, port, fakeIp, autoLaunch)
                 }
                 ServiceCompat.startForeground(
                     this, NOTIFICATION_ID, buildNotification(state),
@@ -168,9 +174,9 @@ class VpnConnectorService : VpnService() {
         stopWorker()
     }
 
-    private fun startWorker(proto: String, host: String, port: Int, fakeIp: Boolean) {
+    private fun startWorker(proto: String, host: String, port: Int, fakeIp: Boolean, autoLaunch: String?) {
         worker?.cancelAndWait()
-        val w = VpnWorker(proto, host, port, fakeIp)
+        val w = VpnWorker(proto, host, port, fakeIp, autoLaunch)
         val t = Thread(w, "VpnWorker")
         w.thread = t
         worker = w
@@ -261,8 +267,13 @@ class VpnConnectorService : VpnService() {
         private val proto: String,
         private val host: String,
         private val port: Int,
-        private val fakeIp: Boolean
+        private val fakeIp: Boolean,
+        private val autoLaunchPkg: String?
     ) : Runnable {
+
+        /** 仅在本次连接首次自检通过时自动打开目标应用；断线重连不重复拉起 */
+        @Volatile
+        private var autoLaunchPending = !autoLaunchPkg.isNullOrEmpty()
 
         @Volatile
         var cancelled = false
@@ -353,9 +364,13 @@ class VpnConnectorService : VpnService() {
             lastError = null
             publishState(State.CONNECTED)
             Thread({
-                val result = runSelfTest()
+                val (selfTestOk, selfTestText) = runSelfTest()
                 if (!cancelled) {
-                    selfTestResult = result
+                    selfTestResult = selfTestText
+                    if (selfTestOk && autoLaunchPending) {
+                        autoLaunchPending = false
+                        mainHandler.post { launchAutoApp() }
+                    }
                     mainHandler.post { notifyListeners() }
                 }
             }, "SelfTest").start()
@@ -414,8 +429,9 @@ class VpnConnectorService : VpnService() {
          *  fake-IP 模式：把自检域名分配一个假 IP 后按完整链路 CONNECT——本地中转
          *  会把它还原为域名、按域名转发上游（上游应答 CONNECT 成功即代表节点出口
          *  已按域名解析并连上目标），DNS 与代理通道一次全验；
-         *  传统模式：分别测代理通道（CONNECT 1.1.1.1:443）与 DNS（DoH） */
-        private fun runSelfTest(): String {
+         *  传统模式：分别测代理通道（CONNECT 1.1.1.1:443）与 DNS（DoH）。
+         *  @return 自检是否全部通过 与 展示文本 */
+        private fun runSelfTest(): Pair<Boolean, String> {
             var result: String
             val ok: Boolean
             if (fakeIp) {
@@ -435,7 +451,30 @@ class VpnConnectorService : VpnService() {
                     if (text.isNotEmpty()) result += "\n" + text.takeLast(300)
                 }
             }
-            return result
+            return ok to result
+        }
+
+        /** 自检通过后自动打开用户选择的应用（每次全新连接仅一次，重连不重复拉起） */
+        private fun launchAutoApp() {
+            val pkg = autoLaunchPkg ?: return
+            val pm = packageManager
+            val label = runCatching {
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            }.getOrNull() ?: pkg
+            val launch = runCatching { pm.getLaunchIntentForPackage(pkg) }.getOrNull()
+            if (launch == null) {
+                Toast.makeText(applicationContext, R.string.autoapp_open_failed, Toast.LENGTH_LONG).show()
+                return
+            }
+            runCatching {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(launch)
+                Toast.makeText(
+                    applicationContext, getString(R.string.autoapp_opened, label), Toast.LENGTH_SHORT
+                ).show()
+            }.onFailure {
+                Toast.makeText(applicationContext, R.string.autoapp_open_failed, Toast.LENGTH_LONG).show()
+            }
         }
 
         /** 通过本地 SOCKS5 中转发起一次 CONNECT，返回「代理通道✓/✗(原因)」 */

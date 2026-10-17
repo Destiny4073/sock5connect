@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.drawable.Drawable
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -12,31 +13,42 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.content.res.AppCompatResources
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.DrawableCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.color.DynamicColors
+import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
+import java.text.Collator
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var dropProtocol: MaterialAutoCompleteTextView
     private lateinit var addressLayout: TextInputLayout
     private lateinit var addressInput: TextInputEditText
+    private lateinit var autoAppLayout: TextInputLayout
+    private lateinit var dropAutoApp: MaterialAutoCompleteTextView
     private lateinit var switchFakeIp: MaterialSwitch
     private lateinit var btnStart: MaterialButton
     private lateinit var btnStop: MaterialButton
@@ -54,6 +66,12 @@ class MainActivity : AppCompatActivity() {
     private var pendingHost: String? = null
     private var pendingPort = 0
     private var pendingFakeIp = true
+
+    /** 「连接成功后自动打开」选中的应用包名；null 表示不自动打开 */
+    private var selectedAutoPkg: String? = null
+
+    /** 下拉框条目（首项为「无」），与自动打开下拉适配器共用 */
+    private val autoAppItems = mutableListOf<AutoAppItem>()
 
     private val requestPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -102,6 +120,20 @@ class MainActivity : AppCompatActivity() {
         dropProtocol.setText(savedProto ?: "SOCKS5", false)
         addressInput.setText(prefs.getString(KEY_ADDRESS, "") ?: "")
         switchFakeIp.isChecked = prefs.getBoolean(KEY_FAKEIP, true)
+
+        autoAppLayout = findViewById(R.id.autoapp_layout)
+        dropAutoApp = findViewById(R.id.drop_autoapp)
+        selectedAutoPkg = prefs.getString(KEY_AUTOLAUNCH, null)
+        dropAutoApp.setText(getString(R.string.autoapp_none), false)
+        dropAutoApp.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
+            val item = autoAppItems.getOrNull(pos) ?: return@OnItemClickListener
+            selectedAutoPkg = item.pkg.ifEmpty { null }
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(KEY_AUTOLAUNCH, selectedAutoPkg)
+                .apply()
+            dropAutoApp.setText(item.toString(), false)
+        }
+        loadInstalledApps()
 
         btnStart.setOnClickListener { onStartClicked() }
         btnStop.setOnClickListener {
@@ -229,6 +261,7 @@ class MainActivity : AppCompatActivity() {
             .putExtra(VpnConnectorService.EXTRA_HOST, host)
             .putExtra(VpnConnectorService.EXTRA_PORT, port)
             .putExtra(VpnConnectorService.EXTRA_FAKEIP, pendingFakeIp)
+            .putExtra(VpnConnectorService.EXTRA_AUTOLAUNCH, selectedAutoPkg ?: "")
         ContextCompat.startForegroundService(this, intent)
         updateUi()
     }
@@ -246,6 +279,8 @@ class MainActivity : AppCompatActivity() {
         dropProtocol.isEnabled = idle
         addressInput.isEnabled = idle
         addressLayout.isEnabled = idle
+        autoAppLayout.isEnabled = idle
+        dropAutoApp.isEnabled = idle
         switchFakeIp.isEnabled = idle
         textStatus.text = when (st) {
             VpnConnectorService.State.DISCONNECTED -> getString(R.string.status_disconnected)
@@ -268,6 +303,84 @@ class MainActivity : AppCompatActivity() {
                 append(getString(R.string.status_reconnecting))
                 VpnConnectorService.lastError?.let { append('\n').append(it) }
             }
+        }
+    }
+
+    /** 后台加载手机上所有带桌面入口的应用（含系统自带），按名称排序后填充下拉框 */
+    private fun loadInstalledApps() {
+        val noneIcon = AppCompatResources.getDrawable(this, R.drawable.ic_no_app)?.mutate()?.apply {
+            DrawableCompat.setTint(
+                this,
+                MaterialColors.getColor(
+                    dropAutoApp, com.google.android.material.R.attr.colorOnSurfaceVariant
+                )
+            )
+        }
+        val noneItem = AutoAppItem(getString(R.string.autoapp_none), "", noneIcon)
+        thread(name = "AppListLoader") {
+            val pm = packageManager
+            val selfPkg = packageName
+            val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val items = mutableListOf<AutoAppItem>()
+            val seen = HashSet<String>()
+            runCatching {
+                val collator = Collator.getInstance(Locale.getDefault())
+                pm.queryIntentActivities(query, 0)
+                    .asSequence()
+                    .mapNotNull { info ->
+                        val pkg = info.activityInfo.packageName
+                        if (pkg == selfPkg) return@mapNotNull null
+                        val label = info.loadLabel(pm)?.toString()?.trim().orEmpty()
+                        if (label.isEmpty()) null else Triple(pkg, label, info.loadIcon(pm))
+                    }
+                    .sortedWith(compareBy(collator) { it.second })
+                    .forEach { (pkg, label, icon) ->
+                        // 同一应用可能注册多个桌面入口，仅保留一条
+                        if (seen.add(pkg)) items.add(AutoAppItem(label, pkg, icon))
+                    }
+            }
+            runOnUiThread {
+                autoAppItems.clear()
+                autoAppItems.add(noneItem)
+                autoAppItems.addAll(items)
+                dropAutoApp.setAdapter(AutoAppAdapter())
+                resolveAutoAppSelection()
+            }
+        }
+    }
+
+    /** 应用列表就绪后回显已保存的选择；应用已卸载则回退为「无」并清除记录 */
+    private fun resolveAutoAppSelection() {
+        val pkg = selectedAutoPkg
+        val item = autoAppItems.firstOrNull { it.pkg == pkg }
+        if (item == null) {
+            if (!pkg.isNullOrEmpty()) {
+                // 所选应用已卸载：清除记录
+                selectedAutoPkg = null
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .remove(KEY_AUTOLAUNCH)
+                    .apply()
+            }
+            dropAutoApp.setText(getString(R.string.autoapp_none), false)
+        } else {
+            dropAutoApp.setText(item.toString(), false)
+        }
+    }
+
+    /** 「自动打开应用」下拉条目：pkg 为空表示「无」（不自动打开），展示为 应用名 (包名) */
+    private data class AutoAppItem(val label: String, val pkg: String, val icon: Drawable?) {
+        override fun toString(): String = if (pkg.isEmpty()) label else "$label ($pkg)"
+    }
+
+    private inner class AutoAppAdapter :
+        ArrayAdapter<AutoAppItem>(this@MainActivity, R.layout.item_autoapp, autoAppItems) {
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val row = convertView ?: layoutInflater.inflate(R.layout.item_autoapp, parent, false)
+            val item = getItem(position) ?: return row
+            row.findViewById<ImageView>(R.id.autoapp_icon).setImageDrawable(item.icon)
+            row.findViewById<TextView>(R.id.autoapp_text).text = item.toString()
+            return row
         }
     }
 
@@ -298,5 +411,6 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_PROTOCOL = "protocol"
         private const val KEY_ADDRESS = "address"
         private const val KEY_FAKEIP = "fake_ip"
+        private const val KEY_AUTOLAUNCH = "auto_launch_pkg"
     }
 }
